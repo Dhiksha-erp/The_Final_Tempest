@@ -11,3 +11,8 @@ AI_MODEL = os.getenv("AI_MODEL", "gpt-4o")
 # CHANGE THESE to your own admin id/password.
 ADMIN_USERNAME = "admin"
 ADMIN_PASSWORD = "admin123"
+
+# Hardcoded User Portal Credentials (temporary until DB-backed auth is added)
+# CHANGE THESE to your own user id/password.
+USER_USERNAME = "user"
+USER_PASSWORD = "user123"
