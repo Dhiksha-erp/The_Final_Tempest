@@ -1,6 +1,6 @@
 # The Final Tempest — VoC Risk Engine
 
-An AI-powered Voice of Customer (VoC) pipeline for a 10-minute quick-commerce grocery delivery app. Customers submit feedback through a self-serve **User Portal**; each ticket is pooled into that day's batch. An **Admin Dashboard** triggers AI analysis per batch — classifying sentiment, category, urgency and churn risk, scoring each ticket for business risk and confidence, and generating automated action recommendations plus an executive summary — all visualized on a live dashboard.
+An AI-powered Voice of Customer (VoC) pipeline for a 10-minute quick-commerce grocery delivery app. Customers submit feedback through a self-serve **User Portal**; every ticket submitted on the same calendar day pools into one shared batch. An **Admin Dashboard** triggers AI analysis per batch — classifying sentiment, category, urgency and churn risk, scoring each ticket for business risk and confidence, and generating automated action recommendations plus an executive summary — all visualized on a live dashboard.
 
 ## Tech Stack
 
@@ -40,13 +40,14 @@ An AI-powered Voice of Customer (VoC) pipeline for a 10-minute quick-commerce gr
 
 - **`main.py`** — FastAPI app and all routing. No business logic lives here; it wires requests to the pipeline/engines below and persists results.
 - **`config.py`** — loads AI provider settings from `.env`, and holds the hardcoded admin + user credentials (see [Login Credentials](#login-credentials)).
-- **`database.py`** — SQLAlchemy models (`UploadBatch`, `FeedbackRecord`) over a local SQLite file (`tempest.db`), auto-created on first run. Includes a lightweight `_migrate()` that backfills new columns (`status`, `batch_date`, `ticket_no`, ...) onto a pre-existing database without losing data.
-- **`services/analysis_pipeline.py`** — `run_pipeline()`, the shared entry point that runs a batch of `FeedbackRecord` rows through all four engines in sequence and updates each row in place.
+- **`database.py`** — SQLAlchemy models (`UploadBatch`, `FeedbackRecord`) over a local SQLite file (`tempest.db`), auto-created on first run. Includes a `_migrate()` function that runs on every startup: it backfills new columns (`status`, `batch_no`, `batch_date`, `ticket_no`) onto a pre-existing database without losing data, and does a one-time cleanup pass to re-home any orphaned feedback rows (left over from an older, count-based batching scheme) into today's batch.
+- **`services/analysis_pipeline.py`** — `run_pipeline()`, the shared entry point that runs a list of `FeedbackRecord` rows through all four engines in sequence and updates each row in place.
 - **`engines/`** — the actual analysis pipeline, one concern per file:
   - `llm_service.py` — sends feedback text to OpenAI with a few-shot prompt, parses the strict-JSON response (category, sentiment, themes, urgency, churn intent, customer priority). Falls back to randomized mock data if the API call fails, instead of crashing.
   - `confidence_engine.py` — scores how trustworthy the LLM's own output looks (penalizes missing/generic fields).
   - `risk_engine.py` — deterministic weighted formula (sentiment + urgency + churn intent + customer priority) → a 0–100 risk score → `Critical` / `High` / `Medium` / `Low`.
   - `recommendation_engine.py` — rule-based next-action recommendation keyed off risk level + category (e.g. "issue instant refund" for spoiled goods, "suspend delivery partner" for rude-partner tickets).
+- **`test_ai_connection.py`** — standalone interactive script to sanity-check the OpenAI connection outside of the FastAPI app.
 
 ### Frontend — `frontend/src/`
 
@@ -56,10 +57,44 @@ A multi-route app (React Router) split into three pages:
 - **`pages/UserPortal.jsx`** (`/user`) — customer-facing self-serve support form, behind a lightweight user login. Pick an issue category from an accordion (delivery delay, missing item, damaged goods, wrong item, payment issue, rude partner, other), optionally attach an order ID, and submit free-text feedback → `POST /api/user/submit-feedback`. Every submission on the same calendar day rolls into one shared batch; the response returns a ticket ID (`TKT-00001`, ...) shown back to the customer, plus a running list of what was submitted this session.
 - **`pages/AdminDashboard.jsx`** (`/admin`) — the analyst-facing dashboard, behind an admin login gate. Sidebar navigation across: **Overview**, **Risk Analysis**, **Categories**, **Sentiment**, **Feedbacks**, **Batches** (badge shows the pending-batch count). Key flows:
   - **Batches** tab lists every day's batch with its ticket count and status (`Pending` / `Analyzed`). **Analyze Now** runs only the not-yet-analyzed tickets in that batch through `POST /api/batches/{batch_id}/analyze`; **View Report** filters the analytics tabs down to that batch; **Delete** removes the batch and its feedback records from the DB.
-  - Once analyzed, tickets populate KPI cards, pie/bar charts (Recharts), and a per-ticket table across the other tabs.
-  - An AI-generated **executive summary** is produced from the top recurring themes via `/api/generate-summary`.
+  - Once analyzed, tickets populate KPI cards, pie/bar charts (Recharts), and a per-ticket table across the other tabs. Unanalyzed tickets (no category yet) are excluded from every analytics tab and only show up in Batches.
+  - An AI-generated **executive summary** is produced from up to 20 recurring themes via `/api/generate-summary`, refreshed every time dashboard data is (re)loaded.
 - **`api.js`** — shared Axios instance pointed at `http://localhost:8000/api`.
 - **`constants.js`** — shared color palette used across all charts.
+
+## End-to-End Flow
+
+1. A customer signs into the **User Portal** and submits feedback. The backend pools it into a batch keyed by **today's date** — no batch exists yet for the day → one is created with status `Pending`; if the day's batch was already analyzed, submitting a new ticket reopens it to `Pending`. The ticket gets an auto-incrementing display ID (`TKT-00001`, ...) but is **not** analyzed yet.
+2. An admin signs into the **Admin Dashboard**, opens **Batches**, and sees the pending batch with its ticket count.
+3. Clicking **Analyze Now** calls `POST /api/batches/{batch_id}/analyze`, which pulls every ticket in that batch that doesn't have a category yet (so already-analyzed tickets in a reopened batch aren't re-billed to the AI) and runs each one, one at a time, through the 4-engine pipeline described below. The batch is then marked `Analyzed`.
+4. The dashboard reloads `/api/feedbacks` and `/api/batches`, gathers themes from analyzed tickets, and calls `/api/generate-summary` for a fresh executive summary.
+5. KPI cards, charts, and tables across Overview / Risk Analysis / Categories / Sentiment / Feedbacks all derive from that same result set, filtered to whichever batch (if any) is selected via **View Report**.
+
+## Why Four Separate "Engines"?
+
+The pipeline deliberately splits into four single-responsibility modules instead of one big function, because each answers a genuinely different question:
+
+| Engine | Question it answers | Deterministic? |
+|---|---|---|
+| `llm_service` | *What is this feedback about?* (classification) | No — depends on the LLM |
+| `confidence_engine` | *How much should we trust that classification?* | Yes — pure rules over the LLM's own output |
+| `risk_engine` | *How bad is this, from a business standpoint?* | Yes — pure weighted formula |
+| `recommendation_engine` | *What should we actually do about it?* | Yes — rule lookup table |
+
+Only the raw classification is delegated to the LLM; the business rules that act on that classification stay under your control, testable and auditable without depending on model behavior.
+
+## The Risk Score Formula
+
+`engines/risk_engine.py` computes a 0–100 score from four weighted signals:
+
+| Signal | Max points | Logic |
+|---|---|---|
+| Sentiment | 30 | Negative = 30, Neutral = 10, Positive = 0 |
+| Urgency (1–5 from LLM) | 30 | `(urgency / 5) * 30` — linear scale |
+| Churn intent | 20 | Boolean from LLM: +20 if true |
+| Customer priority tier | 20 | Tier 1/Enterprise/VIP = 20, Tier 2 = 10, Tier 3 = 0 |
+
+Total maps to a label: **≥ 80** Critical · **≥ 60** High · **≥ 35** Medium · else Low.
 
 ## API Reference
 
