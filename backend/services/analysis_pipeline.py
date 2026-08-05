@@ -20,7 +20,8 @@ async def run_pipeline(db, records: list[FeedbackRecord]) -> list[dict]:
             sentiment=llm_output.get("sentiment"),
             urgency=llm_output.get("urgency"),
             churn_intent=llm_output.get("churn_intent"),
-            customer_priority=llm_output.get("customer_priority")
+            customer_priority=llm_output.get("customer_priority"),
+            category=llm_output.get("category")
         )
         recommendation = generate_recommendation(risk_level, llm_output.get("category"))
 

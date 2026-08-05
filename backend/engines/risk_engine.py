@@ -1,4 +1,6 @@
-def compute_risk_score(sentiment: str, urgency: int, churn_intent: bool, customer_priority: str) -> tuple[int, str]:
+FOOD_SAFETY_CATEGORIES = {"spoiled/damaged goods"}
+
+def compute_risk_score(sentiment: str, urgency: int, churn_intent: bool, customer_priority: str, category: str = None) -> tuple[int, str]:
     score = 0
     
     # Sentiment Weight (0 - 30)
@@ -25,7 +27,13 @@ def compute_risk_score(sentiment: str, urgency: int, churn_intent: bool, custome
         score += 20
     elif "tier 2" in priority_lower:
         score += 10
-        
+
+    # Food-safety floor: a spoiled/damaged goods report is a health and brand
+    # risk no matter how mildly it's worded, so it can never register as
+    # merely "Medium" once the sentiment is confirmed negative.
+    if sentiment_lower == "negative" and (category or "").lower() in FOOD_SAFETY_CATEGORIES:
+        score = max(score, 60)
+
     # Map to Risk Level
     if score >= 80:
         level = "Critical"

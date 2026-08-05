@@ -6,6 +6,9 @@ __pycache__/
 .env
 # Database (optional)
 *.db
+
+# Recovered personal data - never commit
+recovered_backup/
 # React
 frontend/node_modules/
 frontend/dist/

@@ -6,13 +6,16 @@ import {
 } from 'recharts';
 import {
   LayoutDashboard, Tags, Smile, MessageSquare, Moon, Sun,
-  Sparkles, Layers, PlayCircle,
+  Sparkles, Layers, Package, Search, ChevronDown, UploadCloud, FileSpreadsheet,
   ArrowUpRight, ArrowDownRight, ShieldAlert, Database,
   User, Lock, Trash2, Home
 } from 'lucide-react';
 import api from '../api';
 import { COLORS, CHART_PALETTE } from '../constants';
+import { useDarkMode } from '../useDarkMode';
 import '../App.css';
+
+const RISK_ORDER = { critical: 0, high: 1, medium: 2, low: 3 };
 
 function AdminDashboard() {
   // Authentication State
@@ -25,31 +28,85 @@ function AdminDashboard() {
   // App State
   const [results, setResults] = useState([]);
   const [batches, setBatches] = useState([]); // List of batches, one per submission day
+  const [orders, setOrders] = useState([]);
+  const [addresses, setAddresses] = useState([]);
   const [summary, setSummary] = useState("");
-  const [analyzingBatchId, setAnalyzingBatchId] = useState(null);
+  const [summaryKeywords, setSummaryKeywords] = useState([]);
+  const [summaryLoading, setSummaryLoading] = useState(false);
+  const [insightRange, setInsightRange] = useState('week');
+  const [customMonth, setCustomMonth] = useState(""); // 'YYYY-MM' from the month picker
 
   // Tabs and UI State
   const [activeTab, setActiveTab] = useState('Overview');
   const [selectedBatchId, setSelectedBatchId] = useState(""); // Filters by File ID
-  const [isDarkMode, setIsDarkMode] = useState(false);
+  const [isDarkMode, setIsDarkMode] = useDarkMode();
+  const [feedbackSearch, setFeedbackSearch] = useState("");
+
+  // Batch Upload state
+  const [bulkFile, setBulkFile] = useState(null);
+  const [bulkUploading, setBulkUploading] = useState(false);
+  const [bulkResult, setBulkResult] = useState(null);
+  const [bulkError, setBulkError] = useState("");
 
   const loadDashboardData = async () => {
-    const [feedbackRes, batchRes] = await Promise.all([
+    const [feedbackRes, batchRes, orderRes, addressRes] = await Promise.all([
       api.get('/feedbacks'),
-      api.get('/batches')
+      api.get('/batches'),
+      api.get('/user/orders'),
+      api.get('/user/addresses')
     ]);
 
     const feedbacks = feedbackRes.data?.data || [];
     setResults(feedbacks);
     if (batchRes.data) setBatches(batchRes.data.data);
-
-    const allThemes = feedbacks.flatMap(item => item.analysis?.themes || []).slice(0, 20);
-    if (allThemes.length > 0) {
-      const summaryRes = await api.post('/generate-summary', allThemes);
-      setSummary(summaryRes.data.summary);
-    }
+    setOrders(orderRes.data?.data || []);
+    setAddresses(addressRes.data?.data || []);
     return feedbacks;
   };
+
+  const pad = (n) => String(n).padStart(2, '0');
+  const toISO = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+
+  const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+  const computeInsightRange = (preset, monthValue) => {
+    if (preset === 'custom' && monthValue) {
+      const [y, m] = monthValue.split('-').map(Number);
+      return {
+        start: toISO(new Date(y, m - 1, 1)),
+        end: toISO(new Date(y, m, 0)),
+        label: `${MONTH_NAMES[m - 1]} ${y}`
+      };
+    }
+    const daysBack = { today: 0, week: 6, month: 29, sixmonths: 181, year: 364 }[preset] ?? 6;
+    const label = { today: 'today', week: 'the past 7 days', month: 'the past 30 days', sixmonths: 'the past 6 months', year: 'the past 12 months' }[preset] ?? 'the past 7 days';
+    const start = new Date();
+    start.setDate(start.getDate() - daysBack);
+    return { start: toISO(start), end: toISO(new Date()), label };
+  };
+
+  const generateInsights = async (preset, monthValue) => {
+    setSummaryLoading(true);
+    try {
+      const { start, end, label } = computeInsightRange(preset, monthValue);
+      const res = await api.post('/generate-summary', { start_date: start, end_date: end, period_label: label });
+      setSummary(res.data.summary);
+      setSummaryKeywords(res.data.keywords || []);
+    } catch (error) {
+      console.error("Could not generate executive summary:", error);
+      setSummary("Unable to generate the summary right now. Ensure the backend is running.");
+      setSummaryKeywords([]);
+    } finally {
+      setSummaryLoading(false);
+    }
+  };
+
+  // Regenerate insights whenever the selected range changes
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    if (insightRange === 'custom' && !customMonth) return;
+    generateInsights(insightRange, customMonth);
+  }, [isAuthenticated, insightRange, customMonth]);
 
   // Fetch initial data
   useEffect(() => {
@@ -75,21 +132,6 @@ function AdminDashboard() {
     }
   };
 
-  const handleAnalyzeBatch = async (batchId) => {
-    setAnalyzingBatchId(batchId);
-    try {
-      await api.post(`/batches/${batchId}/analyze`);
-      await loadDashboardData();
-      setSelectedBatchId(batchId);
-      setActiveTab('Overview');
-    } catch (error) {
-      console.error("Analysis failed:", error);
-      alert("Analysis failed. Ensure the backend and AI provider are reachable.");
-    } finally {
-      setAnalyzingBatchId(null);
-    }
-  };
-
   const handleDeleteBatch = async (batchId, label) => {
     const confirmed = window.confirm(
       `Delete "${label}" and all its feedback records? This cannot be undone.`
@@ -107,11 +149,46 @@ function AdminDashboard() {
     }
   };
 
+  const handleSetRiskLevel = async (feedbackId, newLevel) => {
+    setResults(prev => prev.map(r => r.id === feedbackId ? { ...r, risk_level: newLevel, risk_override: true } : r));
+    try {
+      const res = await api.put(`/feedbacks/${feedbackId}/risk-level`, { risk_level: newLevel });
+      setResults(prev => prev.map(r => r.id === feedbackId ? { ...r, recommendation: res.data.recommendation } : r));
+    } catch (error) {
+      console.error("Could not update risk level:", error);
+      alert("Failed to update the risk level. Ensure the backend is running.");
+      loadDashboardData().catch(() => {});
+    }
+  };
+
+  const handleBulkUpload = async () => {
+    if (!bulkFile) return;
+    setBulkUploading(true);
+    setBulkError("");
+    setBulkResult(null);
+    try {
+      const formData = new FormData();
+      formData.append('file', bulkFile);
+      const res = await api.post('/admin/bulk-upload', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      });
+      setBulkResult(res.data);
+      setBulkFile(null);
+      await loadDashboardData();
+    } catch (error) {
+      console.error("Bulk upload failed:", error);
+      setBulkError(error.response?.data?.detail || "Upload failed. Ensure the backend is running.");
+    } finally {
+      setBulkUploading(false);
+    }
+  };
+
   // -------------------------
   // Filtering & Metrics Calculations
   // -------------------------
-  // Only feedback that has actually been through the pipeline (has a category)
-  // shows up in analytics - pending, not-yet-analyzed items live in the Batches tab only.
+  // Feedback is analyzed synchronously on submit, so every record here already
+  // has a category by the time it reaches the dashboard - this filter just
+  // guards against any legacy pre-analysis rows.
   const analyzedResults = useMemo(() => results.filter(r => r.analysis?.category), [results]);
 
   const filteredResults = useMemo(() => {
@@ -125,6 +202,51 @@ function AdminDashboard() {
   }, [analyzedResults, selectedBatchId]);
 
   const totalProcessed = filteredResults.length;
+
+  const resultsByRisk = useMemo(() => {
+    return [...filteredResults].sort((a, b) => {
+      const ra = RISK_ORDER[(a.risk_level || 'low').toLowerCase()] ?? 4;
+      const rb = RISK_ORDER[(b.risk_level || 'low').toLowerCase()] ?? 4;
+      return ra - rb;
+    });
+  }, [filteredResults]);
+
+  const searchedFeedbacks = useMemo(() => {
+    const q = feedbackSearch.trim().toLowerCase();
+    if (!q) return resultsByRisk;
+    return resultsByRisk.filter(r => {
+      const haystack = [r.ticket_id, r.text, r.analysis?.category, r.risk_level, r.recommendation, r.confidence_score]
+        .join(' ')
+        .toLowerCase();
+      return haystack.includes(q);
+    });
+  }, [resultsByRisk, feedbackSearch]);
+
+  const highlightMatch = (value, query) => {
+    const str = String(value ?? '');
+    const q = query.trim();
+    if (!q) return str;
+    const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const parts = str.split(new RegExp(`(${escaped})`, 'gi'));
+    if (parts.length === 1) return str;
+    return parts.map((part, i) =>
+      part.toLowerCase() === q.toLowerCase()
+        ? <mark key={i} className="search-highlight">{part}</mark>
+        : part
+    );
+  };
+
+  const highlightKeywords = (text, keywords) => {
+    const unique = [...new Set((keywords || []).filter(Boolean))].sort((a, b) => b.length - a.length);
+    if (unique.length === 0) return text;
+    const escaped = unique.map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    const parts = text.split(new RegExp(`(${escaped.join('|')})`, 'gi'));
+    return parts.map((part, i) =>
+      unique.some(k => k.toLowerCase() === part.toLowerCase())
+        ? <mark key={i} className="insight-keyword">{part}</mark>
+        : part
+    );
+  };
 
   const categories = useMemo(() => {
     const counts = {};
@@ -196,7 +318,6 @@ function AdminDashboard() {
     { name: 'Negative', value: sentimentMetrics.neg, fill: COLORS.red }
   ].filter(d => d.value > 0);
 
-  const pendingBatchCount = useMemo(() => batches.filter(b => b.status === 'Pending').length, [batches]);
 
   // Components
   const NavItem = ({ icon: Icon, label, badge }) => (
@@ -346,12 +467,42 @@ function AdminDashboard() {
         </div>
       </div>
 
-      {summary && (
-        <div className="card">
-          <h2>Executive Insights</h2>
-          <p style={{ color: 'var(--text-secondary)', lineHeight: 1.6 }}>{summary}</p>
+      <div className="card">
+        <h2>Executive Insights</h2>
+        <div className="insight-range-row">
+          {[
+            { key: 'today', label: 'Today' },
+            { key: 'week', label: 'Weekly' },
+            { key: 'month', label: 'Monthly' },
+            { key: 'sixmonths', label: '6 Months' },
+            { key: 'year', label: 'Yearly' }
+          ].map(r => (
+            <button
+              key={r.key}
+              className={`insight-range-btn ${insightRange === r.key ? 'active' : ''}`}
+              onClick={() => { setInsightRange(r.key); setCustomMonth(""); }}
+            >
+              {r.label}
+            </button>
+          ))}
+          <label className={`insight-month-picker ${insightRange === 'custom' ? 'active' : ''}`}>
+            <span>Custom Date:</span>
+            <input
+              type="month"
+              value={customMonth}
+              onChange={(e) => { setCustomMonth(e.target.value); setInsightRange('custom'); }}
+            />
+          </label>
         </div>
-      )}
+
+        {summaryLoading ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', color: 'var(--text-secondary)', padding: '1rem 0' }}>
+            <span className="loading-spinner" style={{ borderTopColor: COLORS.purple }}></span> Generating insights...
+          </div>
+        ) : (
+          <p style={{ color: 'var(--text-secondary)', lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{highlightKeywords(summary, summaryKeywords)}</p>
+        )}
+      </div>
     </>
   );
 
@@ -395,7 +546,7 @@ function AdminDashboard() {
               </tr>
             </thead>
             <tbody>
-              {filteredResults.filter(r => ['critical', 'high'].includes((r.risk_level || '').toLowerCase())).map(r => (
+              {resultsByRisk.filter(r => ['critical', 'high'].includes((r.risk_level || '').toLowerCase())).map(r => (
                 <tr key={r.id}>
                   <td><span className={`badge badge-${r.risk_level.toLowerCase()}`}>{r.risk_level}</span></td>
                   <td className="font-semibold">{r.analysis?.category}</td>
@@ -403,7 +554,7 @@ function AdminDashboard() {
                   <td style={{ color: 'var(--text-secondary)' }}>{r.recommendation}</td>
                 </tr>
               ))}
-              {filteredResults.filter(r => ['critical', 'high'].includes((r.risk_level || '').toLowerCase())).length === 0 && (
+              {resultsByRisk.filter(r => ['critical', 'high'].includes((r.risk_level || '').toLowerCase())).length === 0 && (
                 <tr>
                   <td colSpan="4" style={{ textAlign: 'center', padding: '2rem' }}>No high or critical risk items found. Great job!</td>
                 </tr>
@@ -507,7 +658,25 @@ function AdminDashboard() {
 
   const renderFeedbacksTable = () => (
     <div className="card">
-      <h2>Feedback Risk Registry</h2>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem', marginBottom: '0.5rem' }}>
+        <h2 style={{ marginBottom: 0 }}>Feedback Risk Registry</h2>
+        <div className="grocery-search-wrap" style={{ width: '280px' }}>
+          <div className="grocery-search-input-wrap">
+            <Search size={16} className="grocery-search-icon" />
+            <input
+              className="grocery-search-input"
+              placeholder="Search tickets..."
+              value={feedbackSearch}
+              onChange={(e) => setFeedbackSearch(e.target.value)}
+            />
+            {feedbackSearch && (
+              <button type="button" className="grocery-search-clear" onClick={() => setFeedbackSearch("")}>
+                ×
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
       <div className="table-container">
         <table style={{minWidth: '1100px'}}>
           <thead>
@@ -521,33 +690,52 @@ function AdminDashboard() {
             </tr>
           </thead>
           <tbody>
-            {filteredResults.map(r => {
+            {searchedFeedbacks.map(r => {
               const riskCls = `badge-${(r.risk_level || 'low').toLowerCase()}`;
               return (
                 <tr key={r.id}>
-                  <td className="font-semibold" style={{ fontFamily: 'monospace', color: 'var(--text-secondary)' }}>{r.ticket_id}</td>
-                  <td style={{ paddingRight: '2rem' }}>{r.text}</td>
-                  <td className="font-semibold">{r.analysis?.category || 'N/A'}</td>
+                  <td className="font-semibold" style={{ fontFamily: 'monospace', color: 'var(--text-secondary)' }}>{highlightMatch(r.ticket_id, feedbackSearch)}</td>
+                  <td style={{ paddingRight: '2rem' }}>
+                    {highlightMatch(r.text, feedbackSearch)}
+                    {r.image_data && (
+                      <a href={r.image_data} target="_blank" rel="noopener noreferrer" title="View attached photo">
+                        <img src={r.image_data} alt="Attached" style={{ width: '28px', height: '28px', objectFit: 'cover', borderRadius: '6px', marginLeft: '8px', verticalAlign: 'middle', border: '1px solid var(--border-color)' }} />
+                      </a>
+                    )}
+                  </td>
+                  <td className="font-semibold">{highlightMatch(r.analysis?.category || 'N/A', feedbackSearch)}</td>
                   <td>
                       <span style={{color: r.confidence_score > 80 ? COLORS.green : COLORS.orange, fontWeight: 600}}>
-                        {r.confidence_score}%
+                        {highlightMatch(`${r.confidence_score}%`, feedbackSearch)}
                       </span>
                   </td>
                   <td>
-                    <span className={`badge ${riskCls}`}>
-                      {r.risk_level || 'Low'} Risk
+                    <span className="risk-select-wrap">
+                      <select
+                        className={`badge risk-select ${riskCls}`}
+                        value={r.risk_level || 'Low'}
+                        onChange={(e) => handleSetRiskLevel(r.id, e.target.value)}
+                        title={r.risk_override ? "Manually set by admin (LLM classified this differently)" : "Set by AI — change to override"}
+                      >
+                        <option value="Critical">Critical Risk</option>
+                        <option value="High">High Risk</option>
+                        <option value="Medium">Medium Risk</option>
+                        <option value="Low">Low Risk</option>
+                      </select>
+                      <ChevronDown size={12} className="risk-select-chevron" />
                     </span>
+                    {r.risk_override && <User size={12} style={{ marginLeft: '6px', color: 'var(--text-muted)', verticalAlign: 'middle' }} />}
                   </td>
                   <td style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
-                      {r.recommendation || '-'}
+                      {highlightMatch(r.recommendation || '-', feedbackSearch)}
                   </td>
                 </tr>
               );
             })}
-            {filteredResults.length === 0 && (
+            {searchedFeedbacks.length === 0 && (
               <tr>
                 <td colSpan="6" style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
-                  No analyzed feedback yet.
+                  {feedbackSearch ? `No tickets match "${feedbackSearch}".` : 'No analyzed feedback yet.'}
                 </td>
               </tr>
             )}
@@ -561,7 +749,7 @@ function AdminDashboard() {
     <div className="card">
       <h2>Submitted Batches</h2>
       <p style={{ color: 'var(--text-secondary)', marginBottom: '1.5rem' }}>
-        Feedback submitted through the User Portal automatically groups into one batch per calendar day. Trigger analysis when ready, then view the report.
+        Feedback submitted through the User Portal automatically groups into one batch per calendar day and is analyzed immediately — view the report any time.
       </p>
 
       <div className="table-container">
@@ -589,46 +777,132 @@ function AdminDashboard() {
                 <td style={{ color: 'var(--text-secondary)' }}>{new Date(b.uploaded_at).toLocaleString()}</td>
                 <td><span className="badge badge-low" style={{ background: `${COLORS.blue}20`, color: COLORS.blue }}>{b.feedback_count} items</span></td>
                 <td>
-                  <span className={`badge ${b.status === 'Analyzed' ? 'badge-low' : 'badge-high'}`}>
-                    {b.status}
-                  </span>
+                  <span className="badge badge-low">{b.status}</span>
                 </td>
                 <td style={{ display: 'flex', gap: '0.5rem' }}>
-                  {b.status === 'Analyzed' ? (
-                    <button
-                      className="btn-secondary"
-                      style={{ padding: '0.4rem 0.8rem', fontSize: '0.85rem' }}
-                      onClick={() => {
-                        setSelectedBatchId(b.id);
-                        setActiveTab('Overview');
-                      }}
-                    >
-                      View Report
-                    </button>
-                  ) : (
-                    <button
-                      className="btn-primary"
-                      style={{ padding: '0.4rem 0.8rem', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '0.4rem' }}
-                      onClick={() => handleAnalyzeBatch(b.id)}
-                      disabled={analyzingBatchId === b.id}
-                    >
-                      {analyzingBatchId === b.id
-                        ? <><span className="loading-spinner"></span> Analyzing...</>
-                        : <><PlayCircle size={14} /> Analyze Now</>}
-                    </button>
-                  )}
+                  <button
+                    className="btn-secondary"
+                    style={{ padding: '0.4rem 0.8rem', fontSize: '0.85rem' }}
+                    onClick={() => {
+                      setSelectedBatchId(b.id);
+                      setActiveTab('Overview');
+                    }}
+                  >
+                    View Report
+                  </button>
                   <button
                     className="btn-secondary"
                     style={{ padding: '0.4rem 0.8rem', fontSize: '0.85rem', color: COLORS.red, borderColor: `${COLORS.red}50`, display: 'flex', alignItems: 'center', gap: '0.35rem' }}
                     onClick={() => handleDeleteBatch(b.id, b.label)}
                     title="Delete this batch and its feedback records"
-                    disabled={analyzingBatchId === b.id}
                   >
                     <Trash2 size={14} /> Delete
                   </button>
                 </td>
               </tr>
             ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+
+  const renderBulkUpload = () => (
+    <div className="card">
+      <h2>Batch Upload</h2>
+      <p style={{ color: 'var(--text-secondary)', marginBottom: '1.5rem' }}>
+        Upload a CSV or Excel file to bulk-import feedback tickets. Each row becomes its own ticket and is analyzed immediately, just like a normal submission. There's no file size limit.
+      </p>
+
+      <div style={{ background: 'var(--bg-main)', border: '1px solid var(--border-color)', borderRadius: '10px', padding: '1rem', marginBottom: '1.5rem' }}>
+        <div style={{ fontWeight: 600, marginBottom: '0.5rem' }}>Expected columns</div>
+        <div style={{ color: 'var(--text-secondary)', fontSize: '0.9rem', lineHeight: 1.6 }}>
+          <strong>Required:</strong> a column named <code>text</code>, <code>feedback</code>, <code>message</code>, or <code>comment</code> — the ticket content.<br />
+          <strong>Optional:</strong> a column named <code>order_id</code> — tags the ticket to that order.
+        </div>
+      </div>
+
+      <label className="feedback-image-label" style={{ marginBottom: '1rem' }}>
+        <FileSpreadsheet size={16} />
+        {bulkFile ? bulkFile.name : 'Choose a .csv, .xlsx, or .xls file'}
+        <input
+          type="file"
+          accept=".csv,.xlsx,.xls"
+          hidden
+          onChange={(e) => { setBulkFile(e.target.files?.[0] || null); setBulkResult(null); setBulkError(""); }}
+        />
+      </label>
+
+      <div>
+        <button className="btn-primary" onClick={handleBulkUpload} disabled={!bulkFile || bulkUploading}>
+          {bulkUploading ? <><span className="loading-spinner"></span> Uploading &amp; analyzing...</> : <><UploadCloud size={16} /> Upload</>}
+        </button>
+      </div>
+
+      {bulkError && <div className="login-error" style={{ marginTop: '1rem' }}>{bulkError}</div>}
+
+      {bulkResult && (
+        <div className="submit-success" style={{ marginTop: '1rem' }}>
+          <div>
+            <strong>Import complete!</strong>
+            <p>{bulkResult.imported} ticket{bulkResult.imported === 1 ? '' : 's'} imported and analyzed{bulkResult.skipped > 0 ? `, ${bulkResult.skipped} row${bulkResult.skipped === 1 ? '' : 's'} skipped (empty text)` : ''}.</p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+
+  const renderOrders = () => (
+    <div className="card">
+      <h2>Customer Orders</h2>
+      <p style={{ color: 'var(--text-secondary)', marginBottom: '1.5rem' }}>
+        Every order placed through the User Portal, persisted in the database — survives logout and refresh.
+      </p>
+
+      <div className="table-container">
+        <table style={{ minWidth: '900px' }}>
+          <thead>
+            <tr>
+              <th>Order ID</th>
+              <th>Items</th>
+              <th>Deliver To</th>
+              <th>Total</th>
+              <th>Status</th>
+              <th>Placed</th>
+            </tr>
+          </thead>
+          <tbody>
+            {orders.length === 0 && (
+              <tr>
+                <td colSpan="6" style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-muted)' }}>
+                  No orders yet. Once a customer checks out via the User Portal, it will appear here.
+                </td>
+              </tr>
+            )}
+            {orders.map(o => {
+              const address = addresses.find(a => a.id === o.address_id);
+              return (
+                <tr key={o.id}>
+                  <td className="font-semibold" style={{ fontFamily: 'monospace' }}>{o.order_id}</td>
+                  <td style={{ color: 'var(--text-secondary)' }}>
+                    {o.items.map(i => `${i.name} x${i.qty}`).join(', ')}
+                  </td>
+                  <td style={{ color: 'var(--text-secondary)' }}>
+                    {address ? `${address.label} — ${address.city}` : '—'}
+                  </td>
+                  <td className="font-semibold">
+                    ₹{o.total}
+                    {o.coupon_code && (
+                      <div style={{ fontSize: '0.75rem', color: '#10b981', fontWeight: 500 }}>
+                        {o.coupon_code} saved ₹{o.discount}
+                      </div>
+                    )}
+                  </td>
+                  <td><span className="badge badge-low">{o.status}</span></td>
+                  <td style={{ color: 'var(--text-secondary)' }}>{new Date(o.placed_at).toLocaleString()}</td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -660,7 +934,9 @@ function AdminDashboard() {
         <div className="nav-section">
           <div className="nav-section-title">Data Management</div>
           <NavItem icon={MessageSquare} label="Feedbacks" />
-          <NavItem icon={Database} label="Batches" badge={pendingBatchCount} />
+          <NavItem icon={Package} label="Orders" />
+          <NavItem icon={UploadCloud} label="Batch Upload" />
+          <NavItem icon={Database} label="Batches" />
         </div>
 
         <div className="sidebar-footer">
@@ -706,13 +982,17 @@ function AdminDashboard() {
 
         {activeTab === 'Batches' ? (
           <div className="fade-in">{renderBatches()}</div>
+        ) : activeTab === 'Orders' ? (
+          <div className="fade-in">{renderOrders()}</div>
+        ) : activeTab === 'Batch Upload' ? (
+          <div className="fade-in">{renderBulkUpload()}</div>
         ) : filteredResults.length === 0 ? (
           <div className="empty-state fade-in">
-            <h2>No Analyzed Feedback Yet</h2>
-            <p>Ask users to submit feedback via the User Portal, then come to Batches to trigger analysis.</p>
+            <h2>No Feedback Yet</h2>
+            <p>Ask users to submit feedback via the User Portal — it's analyzed automatically and will show up here.</p>
             <div style={{ display: 'flex', gap: '1rem' }}>
               <button className="btn-secondary" onClick={() => setActiveTab('Batches')}>
-                <Database size={18} /> Go to Batches{pendingBatchCount > 0 ? ` (${pendingBatchCount} pending)` : ''}
+                <Database size={18} /> Go to Batches
               </button>
             </div>
           </div>

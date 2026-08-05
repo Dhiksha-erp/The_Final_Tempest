@@ -1,0 +1,22 @@
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Dependencies
+node_modules/
+
+# macOS
+.DS_Store
+
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Database
+*.db
+
+# Editors
+.vscode/
+.idea/

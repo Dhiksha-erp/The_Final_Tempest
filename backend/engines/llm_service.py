@@ -73,10 +73,10 @@ async def analyze_feedback(text: str) -> dict:
                 "customer_priority": "Tier 2"
             }
 
-async def generate_executive_summary(themes: list) -> str:
+async def generate_executive_summary(themes: list, period_label: str = "the past 7 days") -> str:
     try:
         themes_text = ", ".join(themes)
-        prompt = f"Write a professional 2-paragraph executive summary for the VP of Customer Experience based on these recurring themes from this week's tickets: {themes_text}"
+        prompt = f"Write a professional 2-paragraph executive summary for the VP of Customer Experience based on these recurring themes from {period_label}'s tickets: {themes_text}"
         response = await client.chat.completions.create(
             model=AI_MODEL,
             messages=[

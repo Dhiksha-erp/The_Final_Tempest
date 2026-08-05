@@ -31,6 +31,8 @@ class FeedbackRecord(Base):
     batch_id = Column(String, nullable=True) # Foreign key equivalent to UploadBatch.id
     ticket_no = Column(Integer, index=True) # Auto-incrementing display sequence (TKT-00001, ...)
     text = Column(Text, nullable=False)
+    image_data = Column(Text, nullable=True) # Optional base64 data URL of an attached photo
+    created_at = Column(String, nullable=True, default=lambda: datetime.datetime.now().isoformat())
 
     # LLM Extracted Fields
     category = Column(String, nullable=True)
@@ -45,12 +47,57 @@ class FeedbackRecord(Base):
     risk_score = Column(Integer, nullable=True)
     risk_level = Column(String, nullable=True)
     recommendation = Column(String, nullable=True)
-    
+    risk_override = Column(Boolean, nullable=False, default=False) # True once an admin manually sets the risk level
+
     def get_themes_list(self):
         try:
             return json.loads(self.themes) if self.themes else []
         except:
             return []
+
+class Address(Base):
+    __tablename__ = "addresses"
+
+    id = Column(String, primary_key=True, index=True)
+    label = Column(String, nullable=False, default="Home")
+    full_name = Column(String, nullable=False)
+    phone = Column(String, nullable=False)
+    line1 = Column(String, nullable=False)
+    line2 = Column(String, nullable=True)
+    city = Column(String, nullable=False)
+    state = Column(String, nullable=False)
+    pincode = Column(String, nullable=False)
+    is_default = Column(Boolean, nullable=False, default=False)
+
+class Order(Base):
+    __tablename__ = "orders"
+
+    id = Column(String, primary_key=True, index=True)
+    order_no = Column(Integer, index=True)
+    address_id = Column(String, nullable=True)
+    items = Column(Text, nullable=False) # Stored as JSON string: [{name, weight, cost, qty}]
+    coupon_code = Column(String, nullable=True)
+    subtotal = Column(Float, nullable=False, default=0)
+    discount = Column(Float, nullable=False, default=0)
+    delivery_fee = Column(Float, nullable=False, default=0)
+    tax = Column(Float, nullable=False, default=0)
+    total = Column(Float, nullable=False) # Grand total: subtotal - discount + delivery_fee + tax
+    status = Column(String, nullable=False, default="Placed")
+    placed_at = Column(String, nullable=False, default=lambda: datetime.datetime.now().isoformat())
+
+    def get_items_list(self):
+        try:
+            return json.loads(self.items) if self.items else []
+        except:
+            return []
+
+class Profile(Base):
+    __tablename__ = "profiles"
+
+    id = Column(String, primary_key=True, default="default")
+    full_name = Column(String, nullable=False, default="")
+    email = Column(String, nullable=False, default="")
+    phone = Column(String, nullable=False, default="")
 
 # Create all tables on import
 Base.metadata.create_all(bind=engine)
@@ -71,6 +118,12 @@ def _migrate():
         feedback_cols = {c["name"] for c in insp.get_columns("feedbacks")}
         if "ticket_no" not in feedback_cols:
             conn.execute(text("ALTER TABLE feedbacks ADD COLUMN ticket_no INTEGER"))
+        if "image_data" not in feedback_cols:
+            conn.execute(text("ALTER TABLE feedbacks ADD COLUMN image_data TEXT"))
+        if "created_at" not in feedback_cols:
+            conn.execute(text("ALTER TABLE feedbacks ADD COLUMN created_at VARCHAR"))
+        if "risk_override" not in feedback_cols:
+            conn.execute(text("ALTER TABLE feedbacks ADD COLUMN risk_override BOOLEAN DEFAULT 0"))
 
         # One-time cleanup: feedback left unassigned by the old count-based
         # pooling logic (superseded by date-based batching) needs a home,
